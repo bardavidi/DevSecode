@@ -9,7 +9,8 @@ const { runFullContainerScan } = require("./utils/containerReport");
 const { initSecretScanner, showDiagnostics } = require("./utils/secretDetection");
 const { generatePDFReport } = require("./add-pdf/reportGenerator");
 const { getFixedVersionFromOSV } = require("./utils/osvApiHelper");
-const { showBanditDiagnostics, registerBanditAutoFixes } = require("./banditAutoFixer");
+const { runBanditScan, currentBanditFindings } = require("./utils/sast");
+
 const {
   initSCA,
   showScaDiagnostics,
@@ -22,7 +23,6 @@ const {
 let alertsProvider;
 let currentFindings = [];
 let currentTrivyFindings = [];
-let currentBanditFindings = [];
 let currentContainerFindings = [];
 
 function getTempScanDir() {
@@ -157,6 +157,7 @@ function activate(context) {
                         return;
                       }
 
+                      attachFilePathToTrivyFindings(trivyReportPath);
                       attachLinesToTrivy(trivyReportPath, path.join(rootPath, "requirements.txt"));
                       showScaDiagnostics(trivyReportPath, path.join(rootPath, "requirements.txt"));
 
@@ -249,66 +250,19 @@ function activate(context) {
                           "📄 ContainerScanning_Report.json generated!"
                         );
                       }
-                      const banditReportPath = path.join(
-                        getTempScanDir(),
-                        "bandit_report.json"
-                      ); // Json מוסתר
 
-                      const banditCommand = `bandit -r "${rootPath}" --exclude "${rootPath}/node_modules,${rootPath}/venv" -f json -o "${banditReportPath}"`;
-
-                      const util = require("util");
-                      const exec = util.promisify(cp.exec);
-
-                      (async () => {
-                        try {
-                          await exec(banditCommand, { maxBuffer: 1024 * 1000 });
-                          vscode.window.showInformationMessage(
-                            "✅ Bandit scan completed."
-                          );
-
-                        } catch (e) {
-                          console.error("Bandit error:", e.stderr || e);
+                      await runBanditScan(rootPath, getTempScanDir(), context);
+                      vscode.commands.registerCommand(
+                        "DevSecode.showDashboard",
+                        () => {
+                          showDashboard(context, currentFindings);
                         }
-                        let banditData = [];
+                      );
 
-                        try {
-                          const banditRaw = fs.readFileSync(
-                            banditReportPath,
-                            "utf8"
-                          );
-                          banditData = JSON.parse(banditRaw);
-                          console.log("✅ Bandit report loaded successfully.");
-                        } catch (err) {
-                          vscode.window.showWarningMessage(
-                            "⚠️ Failed to parse bandit_report.json."
-                          );
-                          console.warn("Bandit parsing error:", err);
-                        }
+                      showDashboard(context, currentFindings);
+                      alertsProvider.refresh();
 
-                        vscode.window.showInformationMessage(
-                          "Bandit scan completed successfully."
-                        );
-                        currentBanditFindings = banditData.results || [];
-                        registerBanditAutoFixes(context);
-                        showBanditDiagnostics(context, getTempScanDir);
-                        try {
-                          currentBanditFindings = banditData.results || [];
-                        } catch (e) {
-                          currentBanditFindings = [];
-                        }
 
-                        //  await runDastScan(rootPath);
-                        vscode.commands.registerCommand(
-                          "DevSecode.showDashboard",
-                          () => {
-                            showDashboard(context, findings);
-                          }
-                        );
-
-                        showDashboard(context, findings);
-                        alertsProvider.refresh();
-                        resolve(); // ✅ מסיים את הספינר של VS Code
-                      })();
                     }
                   );
                 }
@@ -504,6 +458,8 @@ module.exports.runDastScan = runDastScan;
 
       const trivyPath = path.join(getTempScanDir(), "trivy_report.json");
       const banditPath = path.join(getTempScanDir(), "bandit_report.json");
+      console.log("📁 Bandit Report Path:", banditReportPath);
+
 
       let trivyFindings = [];
       let banditFindings = [];
@@ -916,6 +872,7 @@ function openAlertBanner(alertItem) {
   const vscode = require("vscode");
   const path = require("path");
   const fs = require("fs");
+  const { currentBanditFindings } = require("./utils/sast");
 
   const id =
     alertItem.RuleID ||
@@ -1055,6 +1012,9 @@ class AlertsProvider {
       ...(currentBanditFindings || []),
     ];
 
+    console.log("🧪 Bandit Findings in TreeView:", currentBanditFindings);
+    console.log("🧩 All Combined Findings:", combinedFindings);
+
     if (combinedFindings.length === 0) {
       return Promise.resolve([]);
     }
@@ -1103,12 +1063,10 @@ class AlertsProvider {
       return "Unknown";
     }
 
-    // פונקציה אחידה לאיתור מזהה (RuleID, VulnerabilityID, CheckID וכו')
     function getAlertId(item) {
       return item.RuleID || item.VulnerabilityID || item.test_name || "Unknown";
     }
 
-    // פונקציה אחידה לאיתור שורה בקובץ (אם יש)
     function getLine(item) {
       return (
         item.StartLine ||
@@ -1120,14 +1078,33 @@ class AlertsProvider {
     }
 
     // ממפים וממיינים
+    // const sortedFindings = combinedFindings
+    //   .map((item) => ({
+    //     ...item,
+    //     severity: getSeverity(item),
+    //     alertId: getAlertId(item),
+    //     line: getLine(item),
+    //   }))
+      
+    //   .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+
     const sortedFindings = combinedFindings
-      .map((item) => ({
-        ...item,
-        severity: getSeverity(item),
-        alertId: getAlertId(item),
-        line: getLine(item),
-      }))
-      .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+  .map((item, idx) => {
+    const severity = getSeverity(item);
+    const alertId = getAlertId(item);
+    const line = getLine(item);
+
+    console.log("🧠 Mapped Alert", idx, { alertId, line, severity, item });
+
+    return {
+      ...item,
+      severity,
+      alertId,
+      line,
+    };
+  })
+  .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+
 
     return Promise.resolve(
       sortedFindings.map((item) => {
