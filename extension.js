@@ -6,10 +6,17 @@ const fs = require("fs");
 const os = require("os");
 const chartImages = {};
 const { runFullContainerScan } = require("./utils/containerReport");
-const { initSecretScanner, showDiagnostics } = require("./utils/secretScanner");
+const { initSecretScanner, showDiagnostics } = require("./utils/secretDetection");
 const { generatePDFReport } = require("./add-pdf/reportGenerator");
 const { getFixedVersionFromOSV } = require("./utils/osvApiHelper");
 const { showBanditDiagnostics, registerBanditAutoFixes } = require("./banditAutoFixer");
+const {
+  initSCA,
+  showScaDiagnostics,
+  attachFilePathToTrivyFindings,
+  attachLinesToTrivy,
+  registerScaInlineFixes,
+} = require("./utils/sca");
 
 // const { runDastScan } = require("./dastScan");
 let alertsProvider;
@@ -29,9 +36,8 @@ function activate(context) {
   vscode.window.registerTreeDataProvider("devsecodeAlerts", alertsProvider);
 
   initSecretScanner(context, getTempScanDir, alertsProvider);
-
-  scaDiagnostics = vscode.languages.createDiagnosticCollection("sca");
-  context.subscriptions.push(scaDiagnostics);
+  initSCA(context, getTempScanDir, alertsProvider);
+  registerScaInlineFixes(context);
 
   let disposable = vscode.commands.registerCommand(
     "DevSecode.runScan",
@@ -151,7 +157,8 @@ function activate(context) {
                         return;
                       }
 
-                      attachFilePathToTrivyFindings(trivyReportPath);
+                      attachLinesToTrivy(trivyReportPath, path.join(rootPath, "requirements.txt"));
+                      showScaDiagnostics(trivyReportPath, path.join(rootPath, "requirements.txt"));
 
                       if (!fs.existsSync(trivyReportPath)) {
                         vscode.window.showInformationMessage(
@@ -310,140 +317,6 @@ function activate(context) {
           }
         );
       });
-
-
-
-      // 🎯 רישום hover על requirements.txt
-      context.subscriptions.push(
-        vscode.languages.registerHoverProvider(
-          { pattern: "**/requirements.txt" },
-          {
-            async provideHover(document, position) {
-              const lineText = document.lineAt(position.line).text;
-
-              const match = lineText.match(/^([a-zA-Z0-9_\-]+)==([\d\.]+)$/);
-              if (!match) return;
-
-              const packageName = match[1];
-              const version = match[2];
-
-              try {
-                const fixes = await getFixedVersionFromOSV(
-                  packageName,
-                  version
-                );
-
-                const cleanFixes = Array.from(
-                  new Set(fixes.filter((v) => /^\d+\.\d+(\.\d+)?$/.test(v)))
-                );
-
-                if (cleanFixes.length > 0) {
-                  return new vscode.Hover(
-                    `⚠️ **${packageName}==${version}** is vulnerable.\n\n💡 Recommended versions:\n- ${cleanFixes.join(
-                      "\n- "
-                    )}`
-                  );
-                }
-              } catch (err) {
-                console.error("❌ Hover error:", err);
-              }
-
-              return; // אין תיקונים => לא מציגים כלום
-            },
-          }
-        )
-      );
-
-      context.subscriptions.push(
-        vscode.languages.registerCodeActionsProvider(
-          { pattern: "**/requirements.txt" },
-          {
-            async provideCodeActions(document, range, context) {
-              const actions = [];
-
-              const lineText = document.lineAt(range.start.line).text;
-              const match = lineText.match(/^([a-zA-Z0-9_\-]+)==([\d\.]+)$/);
-              if (!match) return;
-
-              const packageName = match[1];
-              const version = match[2];
-
-              const fixes = await getFixedVersionFromOSV(packageName, version);
-              if (!fixes || fixes.length === 0) return;
-
-              const cleanFixes = Array.from(
-                new Set(fixes.filter((v) => /^\d+\.\d+(\.\d+)?$/.test(v)))
-              );
-
-              if (cleanFixes.length === 0) return;
-
-              const diagnostic = new vscode.Diagnostic(
-                range,
-                `❌ Vulnerable package: ${packageName}==${version}`,
-                vscode.DiagnosticSeverity.Error
-              );
-              diagnostic.source = "SCA";
-
-              // בדיקה אם כבר קיים, כמו קודם:
-              const existing = scaDiagnostics.get(document.uri) || [];
-              const alreadyExists = existing.some(
-                (d) =>
-                  d.range.start.line === diagnostic.range.start.line &&
-                  d.message === diagnostic.message
-              );
-              if (!alreadyExists) {
-                const updated = [...existing, diagnostic];
-                scaDiagnostics.set(document.uri, updated);
-              }
-
-              const fix = new vscode.CodeAction(
-                `🛠 Update ${packageName} to a safer version`,
-                vscode.CodeActionKind.QuickFix
-              );
-              fix.command = {
-                title: "Choose safe version",
-                command: "devsecode.updatePackageVersion",
-                arguments: [document, range, packageName, version, cleanFixes],
-              };
-
-              return [fix];
-            },
-          },
-          {
-            providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
-          }
-        )
-      );
-
-      context.subscriptions.push(
-        vscode.commands.registerCommand(
-          "devsecode.updatePackageVersion",
-          async (document, range, packageName, currentVersion, fixes) => {
-            const version = await vscode.window.showQuickPick(fixes, {
-              placeHolder: `Choose a secure version for ${packageName}`,
-            });
-
-            if (!version) return;
-
-            const newLine = `${packageName}==${version}`;
-            const edit = new vscode.WorkspaceEdit();
-            const fullRange = document.lineAt(range.start.line).range;
-
-            await edit.replace(document.uri, fullRange, newLine);
-            await vscode.workspace.applyEdit(edit);
-
-            vscode.window.showInformationMessage(
-              `✅ Updated ${packageName} from ${currentVersion} to ${version}`
-            );
-
-            vscode.window.showWarningMessage(
-              `⚠️ Make sure to review any code that uses '${packageName}' (e.g., 'import ${packageName}') to ensure compatibility with version ${version}.`
-            );
-
-            scaDiagnostics.delete(document.uri);
-          }
-        )
-      );
     }
   );
 
@@ -722,65 +595,6 @@ module.exports.runDastScan = runDastScan;
   dashboardStatusBarButton.show();
 
   context.subscriptions.push(dashboardStatusBarButton);
-}
-
-function attachFilePathToTrivyFindings(trivyReportPath) {
-  const fs = require("fs");
-
-  try {
-    const raw = fs.readFileSync(trivyReportPath, "utf-8");
-    const json = JSON.parse(raw);
-
-    if (json.Results) {
-      json.Results.forEach((result) => {
-        const workspacePath =
-          vscode.workspace.workspaceFolders?.[0].uri.fsPath || "";
-        const targetFile = result.Target;
-        const absolutePath = path.join(workspacePath, targetFile);
-
-        if (result.Vulnerabilities) {
-          result.Vulnerabilities.forEach((vuln) => {
-            vuln.file_path = absolutePath;
-          });
-        }
-      });
-    }
-
-    fs.writeFileSync(trivyReportPath, JSON.stringify(json, null, 2));
-    console.log("✅ file_path added successfully to each vulnerability.");
-  } catch (err) {
-    console.error("❌ Failed to process Trivy report:", err);
-  }
-}
-
-function attachLinesToTrivy(trivyReportPath, requirementsPath) {
-  if (!fs.existsSync(trivyReportPath) || !fs.existsSync(requirementsPath)) {
-    console.warn("Trivy report or requirements.txt not found.");
-    return;
-  }
-
-  const report = JSON.parse(fs.readFileSync(trivyReportPath, "utf8"));
-  const lines = fs.readFileSync(requirementsPath, "utf8").split("\n");
-
-  const lineMap = {};
-  lines.forEach((line, idx) => {
-    const pkg = line.split("==")[0].trim().toLowerCase();
-    if (pkg) {
-      lineMap[pkg] = idx + 1;
-    }
-  });
-
-  for (const result of report.Results || []) {
-    for (const vuln of result.Vulnerabilities || []) {
-      const pkg = vuln.PkgName?.toLowerCase();
-      if (pkg && lineMap[pkg]) {
-        vuln.line_number = lineMap[pkg];
-      }
-    }
-  }
-
-  fs.writeFileSync(trivyReportPath, JSON.stringify(report, null, 2));
-  console.log("✅ Line numbers added to Trivy report.");
 }
 
 function showDashboard(context, findings) {
