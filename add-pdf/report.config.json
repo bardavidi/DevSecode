@@ -1,0 +1,10 @@
+{
+  "selectedSeverities": [
+    "Critical",
+    "High",
+    "Medium",
+    "Low"
+  ],
+  "sortBy": "severity",
+  "workspacePath": "/Users/macbook/DevSecode/TestObjects"
+}
