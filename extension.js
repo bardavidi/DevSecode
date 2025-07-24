@@ -10,6 +10,8 @@ const { initSecretScanner, showDiagnostics } = require("./utils/secretDetection"
 const { generatePDFReport } = require("./add-pdf/reportGenerator");
 const { getFixedVersionFromOSV } = require("./utils/osvApiHelper");
 const { runBanditScan, currentBanditFindings } = require("./utils/sast");
+const { showDashboard } = require("./utils/showDashboard");
+const { openAlertBanner, setCurrentFindings, setCurrentTrivyFindings } = require('./utils/openAlertBanner');
 
 const {
   initSCA,
@@ -19,7 +21,6 @@ const {
   registerScaInlineFixes,
 } = require("./utils/sca");
 
-// const { runDastScan } = require("./dastScan");
 let alertsProvider;
 let currentFindings = [];
 let currentTrivyFindings = [];
@@ -203,6 +204,12 @@ function activate(context) {
                         currentTrivyFindings = [];
                       }
 
+                      currentFindings = findings;
+                      setCurrentFindings(currentFindings);
+
+                      currentTrivyFindings = JSON.parse(fs.readFileSync(trivyReportPath, "utf8"));
+                      setCurrentTrivyFindings(currentTrivyFindings);
+
                       // Ask for container image or "all"
                       const containerImage = await vscode.window.showInputBox({
                         placeHolder:
@@ -255,11 +262,11 @@ function activate(context) {
                       vscode.commands.registerCommand(
                         "DevSecode.showDashboard",
                         () => {
-                          showDashboard(context, currentFindings);
+                          showDashboard(context, currentFindings, currentTrivyFindings, currentBanditFindings);
                         }
                       );
 
-                      showDashboard(context, currentFindings);
+                      showDashboard(context, currentFindings, currentTrivyFindings, currentBanditFindings);
                       alertsProvider.refresh();
 
 
@@ -277,75 +284,25 @@ function activate(context) {
   // 🔒 DAST integration directly embedded into DevSecode Extension
   // This is a standalone function based on the logic of dast.py, rewritten in Node.js to be part of the extension.
 
-  /* const runDastScan = async (rootPath) => {
-  const vscode = require("vscode");
-  const path = require("path");
-  const fs = require("fs");
-  const axios = require("axios");
+  // vscode.commands.registerCommand("DevSecode.runDast", async () => {
+  //   const targetUrl = await vscode.window.showInputBox({
+  //     prompt: "Enter the target URL for DAST scan (e.g., http://localhost:3000)",
+  //   });
 
-  const ZAP_API = "http://127.0.0.1:8080";
-  const target = "http://localhost:5000";
+  //   if (!targetUrl) {
+  //     vscode.window.showErrorMessage("No URL provided for DAST scan.");
+  //     return;
+  //   }
 
-  vscode.window.showInformationMessage("🔍 Starting embedded DAST scan...");
+  //   const outputFilePath = path.join(getDastTempDir(), "dast_report.json");
 
-  try {
-    // Spidering
-    const spiderStart = await axios.get(`${ZAP_API}/JSON/spider/action/scan/`, {
-      params: { url: target }
-    });
-    const scanId = spiderStart.data.scan;
-
-    let status = "0";
-    while (status !== "100") {
-      await new Promise((r) => setTimeout(r, 2000));
-      const progress = await axios.get(`${ZAP_API}/JSON/spider/view/status/`, {
-        params: { scanId }
-      });
-      status = progress.data.status;
-    }
-
-    // Wait for passive scan
-    let recordsToScan = 1;
-    while (recordsToScan > 0) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const scanView = await axios.get(`${ZAP_API}/JSON/pscan/view/recordsToScan/`);
-      recordsToScan = parseInt(scanView.data.recordsToScan);
-    }
-
-    // Active scan
-    const ascanStart = await axios.get(`${ZAP_API}/JSON/ascan/action/scan/`, {
-      params: { url: target }
-    });
-    const ascanId = ascanStart.data.scan;
-
-    let ascanStatus = "0";
-    while (ascanStatus !== "100") {
-      await new Promise((r) => setTimeout(r, 5000));
-      const progress = await axios.get(`${ZAP_API}/JSON/ascan/view/status/`, {
-        params: { scanId: ascanId }
-      });
-      ascanStatus = progress.data.status;
-    }
-
-    // Fetch alerts
-    const alertRes = await axios.get(`${ZAP_API}/JSON/core/view/alerts/`);
-    const alerts = alertRes.data.alerts;
-
-    const outputDir = path.join(rootPath, "UI", "json_output");
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    const outputPath = path.join(outputDir, "zap_scan_results.json");
-    fs.writeFileSync(outputPath, JSON.stringify(alerts, null, 2));
-
-    vscode.window.showInformationMessage("✅ DAST scan completed and report saved.");
-  } catch (err) {
-    vscode.window.showWarningMessage("⚠️ DAST scan failed.");
-    console.error("DAST error:", err);
-  }
-
-
-module.exports.runDastScan = runDastScan;
-*/
+  //   try {
+  //     await runDastScan(targetUrl, outputFilePath);
+  //     vscode.window.showInformationMessage("✅ DAST scan completed successfully.");
+  //   } catch (err) {
+  //     vscode.window.showErrorMessage("❌ DAST scan failed.");
+  //   }
+  // });
 
   async function runContainerScan(imageName, rootPath, trivyConfigToUse) {
     const safeName = imageName.replace(/[^a-zA-Z0-9_.-]/g, "_");
@@ -390,7 +347,6 @@ module.exports.runDastScan = runDastScan;
       openAlertBanner(item);
     }
   );
-
   context.subscriptions.push(openAlertBannerCommand);
   const generatePdfCommand = vscode.commands.registerCommand(
     "devsecode.generateCustomPDF",
@@ -553,432 +509,6 @@ module.exports.runDastScan = runDastScan;
   context.subscriptions.push(dashboardStatusBarButton);
 }
 
-function showDashboard(context, findings) {
-  const panel = vscode.window.createWebviewPanel(
-    "devsecDashboard",
-    "DevSecode Dashboard",
-    vscode.ViewColumn.One,
-    { enableScripts: true }
-  );
-
-  const htmlPath = path.join(context.extensionPath, "UI", "dashboard.html");
-  let html = fs.readFileSync(htmlPath, "utf8");
-
-  const imagePath = vscode.Uri.file(
-    path.join(context.extensionPath, "UI", "devsecode_logo.png")
-  );
-  const imageUri = panel.webview.asWebviewUri(imagePath);
-
-  // 🆕 קריאת הדוח של Trivy
-  const trivyReportPath = path.join(getTempScanDir(), "trivy_report.json");
-
-  let trivyData = null;
-  if (fs.existsSync(trivyReportPath)) {
-    try {
-      const trivyRaw = fs.readFileSync(trivyReportPath, "utf8");
-      trivyData = JSON.parse(trivyRaw);
-    } catch (err) {
-      console.warn("Failed to parse trivy report");
-    }
-  }
-
-  // 📘 קריאת דוח Bandit
-  const banditReportPath = path.join(getTempScanDir(), "bandit_report.json");
-
-  let banditData = null;
-  if (fs.existsSync(banditReportPath)) {
-    try {
-      const rawBandit = fs.readFileSync(banditReportPath, "utf8");
-      banditData = JSON.parse(rawBandit);
-    } catch (err) {
-      vscode.window.showWarningMessage(
-        "⚠️ Failed to parse bandit_report.json."
-      );
-      console.warn("Bandit parsing error:", err);
-    }
-  }
-
-  // 🧠 הוספת שני הדוחות כסקריפטים לדף
-  html = html
-    .replace('src="./devsecode_logo.png"', `src="${imageUri}"`)
-    .replace(
-      "</head>",
-      `<script>
-        const reportData = ${JSON.stringify(findings)};
-        const scaData = ${JSON.stringify(trivyData || [])};
-        const banditData = ${JSON.stringify(banditData || [])};
-      </script></head>`
-    );
-
-  panel.webview.html = html;
-
-  panel.webview.onDidReceiveMessage(async (message) => {
-    if (message.type === "chartImage") {
-      chartImages[message.chartId] = {
-        image: message.dataUrl,
-        legend: message.legend || [],
-      };
-      console.log(`📊 Got image & legend: ${message.chartId}`);
-    }
-
-    if (message.type === "vulnerabilityTypeClicked") {
-      const clickedType = message.label;
-
-      const detailPanel = vscode.window.createWebviewPanel(
-        "vulnerabilityDetail",
-        `Vulnerability: ${clickedType}`,
-        vscode.ViewColumn.One,
-        {
-          enableScripts: true,
-          localResourceRoots: [
-            vscode.Uri.file(path.join(context.extensionPath, "UI")),
-          ],
-        }
-      );
-
-      const htmlPath = path.join(
-        context.extensionPath,
-        "UI",
-        "vulnerabilityChartDetail.html"
-      );
-      let rawHtml = fs.readFileSync(htmlPath, "utf8");
-
-      // מיזוג כל הסריקות
-      const allFindings = [
-        ...(currentFindings || []),
-        ...(currentTrivyFindings?.Results?.flatMap(
-          (r) => r.Vulnerabilities || []
-        ) || []),
-        ...(currentBanditFindings || []),
-      ];
-
-      const clickedTypeLower = clickedType.toLowerCase();
-
-      const findingsForType = allFindings.filter((item) => {
-        const ruleId = item.RuleID || item.ruleId || "";
-        const vulnId = item.VulnerabilityID || "";
-        const testName = item.test_name || "";
-
-        return (
-          ruleId.toLowerCase() === clickedTypeLower ||
-          vulnId.toLowerCase() === clickedTypeLower ||
-          testName.toLowerCase() === clickedTypeLower
-        );
-      });
-
-      // פונקציה שמוציאה שורה תקינה מכל ממצא (אם קיימת)
-      function getLine(item) {
-        return (
-          item.StartLine ||
-          item.line_number ||
-          item.Line ||
-          item.Location?.StartLine ||
-          item.location?.start?.line ||
-          null
-        );
-      }
-
-      function getFilePath(item) {
-        return (
-          item.file ||
-          item.File ||
-          item.filename ||
-          item.file_path ||
-          item.FilePath ||
-          item.Target ||
-          item.Location?.Path ||
-          item.location?.file ||
-          item.location?.path ||
-          null
-        );
-      }
-
-      const findingsWithLines = findingsForType.map((item) => ({
-        ...item,
-        line: getLine(item),
-        file: getFilePath(item),
-      }));
-
-      // הזרקת מידע ל־HTML לפני סגירת </head>
-      rawHtml = rawHtml.replace(
-        "</head>",
-        `<script>
-          const selectedVulnerabilityLabel = ${JSON.stringify(clickedType)};
-          const occurrences = ${JSON.stringify(findingsWithLines)};
-        </script></head>`
-      );
-
-      detailPanel.webview.html = rawHtml;
-
-      detailPanel.webview.onDidReceiveMessage(
-        (message) => {
-          if (message.command === "openAlertBanner" && message.alertItem) {
-            openAlertBanner(message.alertItem); // משתמש בפונקציה הקיימת
-          }
-        },
-        undefined,
-        context.subscriptions
-      );
-    }
-
-    //************************************************
-    if (message.type === "severitySliceClicked") {
-      const clickedSeverity = message.label;
-      const clickedScanner = message.scanner;
-
-      const detailPanel = vscode.window.createWebviewPanel(
-        "severityDetail",
-        `Severity: ${clickedSeverity}`,
-        vscode.ViewColumn.One,
-        {
-          enableScripts: true,
-          localResourceRoots: [
-            vscode.Uri.file(path.join(context.extensionPath, "UI")),
-          ],
-        }
-      );
-
-      const htmlPath = path.join(
-        context.extensionPath,
-        "UI",
-        "severityChartDetail.html"
-      );
-      let rawHtml = fs.readFileSync(htmlPath, "utf8");
-
-      function getScannerName(item) {
-        const hasTrivyID = item.VulnerabilityID;
-        const hasGitleaksID =
-          item.RuleID ||
-          item.rule_id ||
-          item.Rule ||
-          (item.rule && item.rule.id);
-        const hasBanditID = item.test_name;
-        if (hasTrivyID) return "trivy";
-        if (hasGitleaksID) return "gitleaks";
-        if (hasBanditID) return "bandit";
-        return "unknown";
-      }
-
-      function getSeverity(item) {
-        if (item.Entropy !== undefined) {
-          if (item.Entropy > 4.5) return "Critical";
-          if (item.Entropy > 4) return "High";
-          if (item.Entropy > 3.5) return "Medium";
-          return "Low";
-        }
-        if (item.Severity) {
-          const sev = item.Severity.toLowerCase();
-          if (sev === "critical") return "Critical";
-          if (sev === "high") return "High";
-          if (sev === "medium") return "Medium";
-          if (sev === "low") return "Low";
-        }
-        if (item.Level) {
-          const lvl = item.Level.toLowerCase();
-          if (lvl === "critical") return "Critical";
-          if (lvl === "high") return "High";
-          if (lvl === "medium") return "Medium";
-          if (lvl === "low") return "Low";
-        }
-        if (item.issue_severity) {
-          const issue = item.issue_severity.toLowerCase();
-          if (issue === "critical") return "Critical";
-          if (issue === "high") return "High";
-          if (issue === "medium") return "Medium";
-          if (issue === "low") return "Low";
-        }
-        return "Unknown";
-      }
-
-      function getLine(item) {
-        return (
-          item.StartLine ||
-          item.line_number ||
-          item.Line ||
-          item.Location?.StartLine ||
-          item.location?.start?.line ||
-          null
-        );
-      }
-
-      function getFilePath(item) {
-        return (
-          item.file ||
-          item.File ||
-          item.filename ||
-          item.file_path ||
-          item.FilePath ||
-          item.Target ||
-          item.Location?.Path ||
-          item.location?.file ||
-          item.location?.path ||
-          null
-        );
-      }
-
-      const allFindings = [
-        ...(currentFindings || []),
-        ...(currentTrivyFindings?.Results?.flatMap(
-          (r) => r.Vulnerabilities || []
-        ) || []),
-        ...(currentBanditFindings || []),
-      ];
-
-      const normalizedFindings = allFindings.map((item) => ({
-        ...item,
-        severity: getSeverity(item),
-        scanner: getScannerName(item),
-      }));
-
-      const clickedSeverityLower = clickedSeverity.toLowerCase();
-      const clickedScannerLower = clickedScanner.trim().toLowerCase();
-
-      const findingsForSeverity = normalizedFindings.filter(
-        (item) =>
-          item.severity.toLowerCase() === clickedSeverityLower &&
-          item.scanner.toLowerCase() === clickedScannerLower
-      );
-
-      const findingsWithLines = findingsForSeverity.map((item) => ({
-        ...item,
-        line: getLine(item),
-        file: getFilePath(item),
-      }));
-
-      rawHtml = rawHtml.replace(
-        "</head>",
-        `<script>
-          const selectedSeverityLabel = ${JSON.stringify(clickedSeverity)};
-          const occurrences = ${JSON.stringify(findingsWithLines)};
-        </script></head>`
-      );
-
-      detailPanel.webview.html = rawHtml;
-
-      detailPanel.webview.onDidReceiveMessage(
-        (message) => {
-          if (message.command === "openAlertBanner" && message.alertItem) {
-            openAlertBanner(message.alertItem);
-          }
-        },
-        undefined,
-        context.subscriptions
-      );
-    }
-  });
-}
-
-function openAlertBanner(alertItem) {
-  const vscode = require("vscode");
-  const path = require("path");
-  const fs = require("fs");
-  const { currentBanditFindings } = require("./utils/sast");
-
-  const id =
-    alertItem.RuleID ||
-    alertItem.VulnerabilityID ||
-    alertItem.test_name ||
-    "Unknown";
-  const panelTitle = `Alert: ${id}`;
-
-  const alertPanel = vscode.window.createWebviewPanel(
-    "alertDetail",
-    panelTitle,
-    vscode.ViewColumn.Active,
-    {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.file(path.join(__dirname, "UI"))],
-    }
-  );
-
-  const htmlPath = path.join(__dirname, "UI", "alertpage.html");
-  let html = fs.readFileSync(htmlPath, "utf8");
-
-  let reportData = [];
-
-  if (alertItem.VulnerabilityID) {
-    // Trivy
-    if (
-      typeof currentTrivyFindings !== "undefined" &&
-      currentTrivyFindings.Results
-    ) {
-      reportData = currentTrivyFindings.Results.flatMap(
-        (result) => result.Vulnerabilities || []
-      );
-    }
-  } else if (
-    alertItem.test_name ||
-    alertItem.issue_text ||
-    alertItem.issue_severity
-  ) {
-    // Bandit
-    if (
-      typeof currentBanditFindings !== "undefined" &&
-      Array.isArray(currentBanditFindings)
-    ) {
-      reportData = currentBanditFindings;
-    }
-  } else {
-    // Gitleaks
-    if (typeof currentFindings !== "undefined") {
-      reportData = currentFindings;
-    }
-  }
-
-  // שים לב, לשלב גם נתיב קובץ של האלרט אם קיים (ל-Gitleaks או Trivy)
-  const filePath =
-    alertItem.file ||
-    alertItem.File ||
-    alertItem.FilePath ||
-    (alertItem.Location && alertItem.Location.Path) ||
-    alertItem.filename ||
-    alertItem.file_path ||
-    "";
-
-  const startLine =
-    alertItem.line ||
-    alertItem.line_number ||
-    alertItem.Line ||
-    alertItem.StartLine ||
-    (alertItem.Location && alertItem.Location.StartLine) ||
-    (alertItem.location && alertItem.location.start?.line) ||
-    0;
-
-  html = html.replace(
-    "</head>",
-    `<script>
-      const reportData = ${JSON.stringify(reportData)};
-      const targetRuleID = "${id}";
-      const targetStartLine = ${startLine || 0};
-      const alertItem = ${JSON.stringify(alertItem)};
-      const filePath = ${JSON.stringify(filePath)};
-    </script></head>`
-  );
-
-  alertPanel.webview.html = html;
-
-  alertPanel.webview.onDidReceiveMessage(
-    (message) => {
-      if (message.command === "goToLine") {
-        const { filePath, lineNumber } = message;
-        if (filePath && lineNumber) {
-          const uri = vscode.Uri.file(filePath);
-          vscode.workspace.openTextDocument(uri).then((doc) => {
-            vscode.window.showTextDocument(doc, {
-              selection: new vscode.Range(
-                new vscode.Position(lineNumber - 1, 0),
-                new vscode.Position(lineNumber - 1, Number.MAX_SAFE_INTEGER)
-              ),
-            });
-          });
-        }
-      }
-    },
-    undefined,
-    []
-  );
-}
-
 function deactivate() { }
 
 class AlertsProvider {
@@ -1076,34 +606,22 @@ class AlertsProvider {
         "none"
       );
     }
-
-    // ממפים וממיינים
-    // const sortedFindings = combinedFindings
-    //   .map((item) => ({
-    //     ...item,
-    //     severity: getSeverity(item),
-    //     alertId: getAlertId(item),
-    //     line: getLine(item),
-    //   }))
-      
-    //   .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
-
     const sortedFindings = combinedFindings
-  .map((item, idx) => {
-    const severity = getSeverity(item);
-    const alertId = getAlertId(item);
-    const line = getLine(item);
+      .map((item, idx) => {
+        const severity = getSeverity(item);
+        const alertId = getAlertId(item);
+        const line = getLine(item);
 
-    console.log("🧠 Mapped Alert", idx, { alertId, line, severity, item });
+        console.log("🧠 Mapped Alert", idx, { alertId, line, severity, item });
 
-    return {
-      ...item,
-      severity,
-      alertId,
-      line,
-    };
-  })
-  .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
+        return {
+          ...item,
+          severity,
+          alertId,
+          line,
+        };
+      })
+      .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
 
 
     return Promise.resolve(
